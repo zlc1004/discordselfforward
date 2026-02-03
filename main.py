@@ -1,6 +1,8 @@
 import discord
 import json
 import os
+import aiohttp
+from discord.abc import GuildChannel
 
 # Ensure data directory exists
 os.makedirs("./data", exist_ok=True)
@@ -21,18 +23,8 @@ def save_settings(settings):
     with open(SETTINGS_FILE, "w") as f:
         json.dump(settings, f, indent=2)
 
-
-# # Bot setup
-# intents = discord.Intents.default()
-# intents.message_content = True
-# intents.messages = True
-
-# client = discord.Client(intents=intents)
-
 client = discord.Client()
 
-# Store active menus and waiting states
-active_menus = {}
 add_forward_waiting = {}
 remove_forward_waiting = {}
 
@@ -44,104 +36,39 @@ async def on_ready():
 
 @client.event
 async def on_message(message):
-    # Skip bot's own messages
-    if message.author == client.user:
-        return
+    # Skip bot messages
+    if message.author.id == client.user.id:
+        # Check for +add command
+        if message.content.startswith("+add "):
+            await cmd_add_forward(message)
+            return
 
-    # Check for +menu command
-    if message.content.strip() == "+menu":
-        await handle_menu_command(message)
-        return
+        # Check for +remove command
+        if message.content.startswith("+remove "):
+            await cmd_remove_forward(message)
+            return
 
-    # Check if this is a menu response
-    if message.author.id in active_menus and not message.content.startswith("+"):
-        await handle_menu_response(message)
-        return
-
-    # Check if this is an add forward response
-    if message.author.id in add_forward_waiting and not message.content.startswith("+"):
-        await process_add_forward(message)
-        return
-
-    # Check if this is a remove forward response
-    if message.author.id in remove_forward_waiting and not message.content.startswith(
-        "+"
-    ):
-        await process_remove_forward(message)
-        return
+        # Check for +list command
+        if message.content.strip() == "+list":
+            await cmd_list_forwards(message)
+            return
 
     # Process message forwarding
     await process_forward(message)
 
-
-async def handle_menu_command(message):
-    """Handle +menu command"""
-    if message.author.id in active_menus:
-        await message.reply(
-            "You already have an active menu. Please complete or cancel it first."
-        )
-        return
-
-    menu_msg = await message.reply(
-        "**Message Forwarding Menu**\n\n"
-        "1. Add forward - Add a new channel forward\n"
-        "2. Remove forward - Remove an existing forward\n"
-        "3. List forwards - Show all active forwards\n\n"
-        "Reply with the number (1-3) to select an option."
-    )
-
-    active_menus[message.author.id] = {"message": menu_msg, "channel": message.channel}
-
-
-async def handle_menu_response(message):
-    """Handle menu option selection"""
-    menu_data = active_menus[message.author.id]
-
-    if message.content.strip() == "1":
-        await handle_add_forward(message)
-    elif message.content.strip() == "2":
-        await handle_remove_forward(message)
-    elif message.content.strip() == "3":
-        await handle_list_forwards(message)
-    else:
-        await message.reply("Invalid option. Please reply with 1, 2, or 3.")
-        return
-
-    del active_menus[message.author.id]
-
-
-async def handle_add_forward(message):
-    """Handle add forward option"""
-    msg = await message.reply(
-        "**Add Forward**\n\n"
-        "Please provide two channel IDs separated by a space.\n"
-        "Format: `source_channel_id target_channel_id`\n\n"
-        "Messages from the source channel will be forwarded to the target channel."
-    )
-    add_forward_waiting[message.author.id] = {
-        "channel": message.channel,
-        "message": msg,
-    }
-
-
-async def process_add_forward(message):
-    """Process the add forward input"""
-    data = add_forward_waiting.pop(message.author.id)
-
+async def cmd_add_forward(message):
+    """Handle +add command with arguments"""
     try:
-        parts = message.content.strip().split()
+        parts = message.content.strip().split(' ')[1:]
         if len(parts) != 2:
-            await message.reply(
-                "Invalid format. Please provide exactly two channel IDs separated by a space."
-            )
+            await message.reply("Usage: `+add source_channel_id webhook_url`")
             return
 
+        print(parts)
         source_id = int(parts[0])
-        target_id = int(parts[1])
+        webhook_url = parts[1].strip()
 
-        # Verify channels exist
         source_channel = client.get_channel(source_id)
-        target_channel = client.get_channel(target_id)
 
         if not source_channel:
             await message.reply(
@@ -149,99 +76,77 @@ async def process_add_forward(message):
             )
             return
 
-        if not target_channel:
-            await message.reply(
-                f"Target channel {target_id} not found or bot doesn't have access."
-            )
-            return
-
-        # Load settings and add forward
         settings = load_settings()
 
-        # Check if forward already exists
         for forward in settings["forwards"]:
-            if forward["source"] == source_id and forward["target"] == target_id:
+            if forward["source"] == source_id and forward["webhook"] == webhook_url:
                 await message.reply("This forward already exists!")
                 return
 
-        settings["forwards"].append({"source": source_id, "target": target_id})
+        settings["forwards"].append({"source": source_id, "webhook": webhook_url})
 
         save_settings(settings)
 
+        source_name = (
+            source_channel.name
+            if isinstance(source_channel, GuildChannel)
+            else f"DM ({source_id})"
+        )
         await message.reply(
             f"✅ Forward added successfully!\n"
-            f"Source: {source_channel.name} ({source_id})\n"
-            f"Target: {target_channel.name} ({target_id})"
+            f"Source: {source_name} ({source_id})\n"
+            f"Target: Webhook"
         )
 
     except ValueError:
         await message.reply(
-            "Invalid channel IDs. Please provide valid numeric channel IDs."
+            "Invalid channel ID. Please provide a valid numeric channel ID."
         )
     except Exception as e:
         await message.reply(f"Error adding forward: {str(e)}")
 
 
-async def handle_remove_forward(message):
-    """Handle remove forward option"""
-    settings = load_settings()
-
-    if not settings["forwards"]:
-        await message.reply("No forwards to remove.")
-        return
-
-    forward_list = "**Active Forwards:**\n\n"
-    for i, forward in enumerate(settings["forwards"], 1):
-        source = client.get_channel(forward["source"])
-        target = client.get_channel(forward["target"])
-        source_name = source.name if source else "Unknown"
-        target_name = target.name if target else "Unknown"
-        forward_list += f"{i}. {source_name} → {target_name}\n"
-
-    forward_list += "\nReply with the number of the forward to remove."
-
-    msg = await message.reply(forward_list)
-    remove_forward_waiting[message.author.id] = {
-        "channel": message.channel,
-        "message": msg,
-        "forwards": settings["forwards"],
-    }
-
-
-async def process_remove_forward(message):
-    """Process the remove forward input"""
-    data = remove_forward_waiting.pop(message.author.id)
-    forwards = data["forwards"]
-
+async def cmd_remove_forward(message):
+    """Handle +remove command with arguments"""
     try:
-        index = int(message.content.strip()) - 1
-        if index < 0 or index >= len(forwards):
+        parts = message.content.strip().split()
+        if len(parts) != 2 or not parts[1].isdigit():
             await message.reply(
-                f"Invalid number. Please choose between 1 and {len(forwards)}."
+                "Usage: `+remove <forward_number>`\nUse `+list` to see forward numbers."
             )
             return
 
-        removed = forwards.pop(index)
+        index = int(parts[1]) - 1
 
         settings = load_settings()
-        settings["forwards"] = forwards
+
+        if index < 0 or index >= len(settings["forwards"]):
+            await message.reply(
+                f"Invalid number. Please choose between 1 and {len(settings['forwards'])}."
+            )
+            return
+
+        removed = settings["forwards"].pop(index)
+
         save_settings(settings)
 
         source = client.get_channel(removed["source"])
-        target = client.get_channel(removed["target"])
-        source_name = source.name if source else "Unknown"
-        target_name = target.name if target else "Unknown"
+        source_name = (
+            source.name
+            if isinstance(source, GuildChannel)
+            else f"DM ({removed['source']})"
+            if source
+            else "Unknown"
+        )
 
-        await message.reply(f"✅ Removed forward: {source_name} → {target_name}")
+        await message.reply(f"✅ Removed forward: {source_name} → Webhook")
 
-    except ValueError:
-        await message.reply("Please provide a valid number.")
     except Exception as e:
         await message.reply(f"Error removing forward: {str(e)}")
 
 
-async def handle_list_forwards(message):
-    """Handle list forwards option"""
+async def cmd_list_forwards(message):
+    """Handle +list command"""
     settings = load_settings()
 
     if not settings["forwards"]:
@@ -251,46 +156,55 @@ async def handle_list_forwards(message):
     forward_list = "**Active Forwards:**\n\n"
     for i, forward in enumerate(settings["forwards"], 1):
         source = client.get_channel(forward["source"])
-        target = client.get_channel(forward["target"])
-        source_name = source.name if source else f"Unknown ({forward['source']})"
-        target_name = target.name if target else f"Unknown ({forward['target']})"
-        forward_list += f"{i}. {source_name} → {target_name}\n"
+        source_name = (
+            source.name
+            if isinstance(source, GuildChannel)
+            else f"DM ({forward['source']})"
+            if source
+            else f"Unknown ({forward['source']})"
+        )
+        forward_list += f"{i}. {source_name} → Webhook\n"
 
     await message.reply(forward_list)
 
 
 async def process_forward(message):
     """Process message forwarding"""
-    if message.author == client.user:
-        return
-
+    
     settings = load_settings()
 
     for forward in settings["forwards"]:
         if message.channel.id == forward["source"]:
-            target_channel = client.get_channel(forward["target"])
-            if target_channel:
-                # Format: displayname(@username): message
-                author_name = message.author.display_name
-                author_username = message.author.name
-                content = message.content
+            webhook_url = forward["webhook"]
 
-                # Handle attachments
-                attachments = ""
-                if message.attachments:
-                    attachments = "\n" + "\n".join(
-                        [att.url for att in message.attachments]
-                    )
+            # Set webhook username to the original author's display name
+            username = message.author.display_name
 
-                forwarded_message = (
-                    f"**{author_name}** (@{author_username}): {content}{attachments}"
-                )
+            content = message.content
 
-                try:
-                    await target_channel.send(forwarded_message)
-                except Exception as e:
-                    print(f"Error forwarding message: {e}")
+            # Handle attachments
+            if message.attachments:
+                attachments_text = "\n".join([att.url for att in message.attachments])
+                if content:
+                    content += "\n" + attachments_text
+                else:
+                    content = attachments_text
+
+            # Send via webhook with custom username
+            payload = {"content": content, "username": username}
+
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(webhook_url, json=payload) as response:
+                        if response.status not in [200, 204]:
+                            print(f"Error forwarding message: HTTP {response.status}")
+            except Exception as e:
+                print(f"Error forwarding message: {e}")
 
 
 # Run the bot using BOT_TOKEN environment variable
-client.run(os.environ.get("BOT_TOKEN"))
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+if not BOT_TOKEN:
+    print("Error: BOT_TOKEN environment variable not set")
+    exit(1)
+client.run(BOT_TOKEN)

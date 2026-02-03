@@ -2,3 +2,7 @@ services:
   server:
     build:
       context: .
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+    volumes:
+      - ./data:/app/data
